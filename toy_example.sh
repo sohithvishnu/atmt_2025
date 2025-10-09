@@ -5,9 +5,9 @@
 #SBATCH --mem=8GB
 #SBATCH --cpus-per-task=1
 #SBATCH --gpus=1
-#SBATCH --output=toy_example.out
+#SBATCH --output=toy_example1.out
 
-# module load gpu
+module load gpu
 module load mamba
 source activate atmt
 export XLA_FLAGS=--xla_gpu_cuda_data_dir=$CONDA_PREFIX/pkgs/cuda-toolkit
@@ -32,7 +32,7 @@ python preprocess.py \
     --tgt-vocab-size 1000 \
     --ignore-existing \
     --force-train
-
+ 
 python train.py \
     --data toy_example/data/prepared/ \
     --src-tokenizer toy_example/tokenizers/cz-bpe-1000.model \
@@ -53,8 +53,8 @@ python train.py \
     --dim-feedforward-decoder 1024 \
     --max-seq-len 100 \
     --n-encoder-layers 3 \
-    --n-decoder-layers 3
-
+    --n-decoder-layers 3 \
+    --cuda 
 python translate.py \
     --input toy_example/data/raw/test.cz \
     --src-tokenizer toy_example/tokenizers/cz-bpe-1000.model \
@@ -64,4 +64,5 @@ python translate.py \
     --max-len 100 \
     --output toy_example/toy_example_output.en \
     --bleu \
-    --reference toy_example/data/raw/test.en
+    --reference toy_example/data/raw/test.en \
+    --cuda

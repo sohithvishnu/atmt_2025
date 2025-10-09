@@ -18,8 +18,12 @@ toy_example/logs
 toy_example/checkpoints
 toy_example/toy_example_output.en
 # other outputs
-/example
-/cz-en
+*/**
 
+!*/output.txt
+!*/output/
+!*/output/**
+
+!/*
 # unused
 seq2seq/embedding_saver.py
