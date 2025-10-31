@@ -27,3 +27,7 @@ toy_example/toy_example_output.en
 !/*
 # unused
 seq2seq/embedding_saver.py
+
+# Allow assignment1 folder
+!assignment1/
+!assignment1/**
