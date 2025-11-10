@@ -1,0 +1,22 @@
+
+Filesystems usage for user syacha ( uid 646322396 ):
+-------------------------------------------------------------------------------------
+Directory                       Used   Limit   Used,%         Files     Limit
+-------------------------------------------------------------------------------------
+/home/syacha                   3.4MB    15GB     0.0%           328    100000
+/data/syacha                    36GB   200GB    17.6%         49254          
+/scratch/syacha                   0B    20TB     0.0%             1          
+
+/shares/atomt.pilot.s3it.uzh    32GB    10TB     0.3%          2834          
+-------------------------------------------------------------------------------------
+
+Files on /scratch may be purged after 30 days.
+See https://docs.s3it.uzh.ch/cluster/data
+
+Traceback (most recent call last):
+  File "/data/syacha/atmt_2025/translate.py", line 186, in <module>
+    main(args)
+  File "/data/syacha/atmt_2025/translate.py", line 55, in main
+    args_loaded = argparse.Namespace(**{**vars(state_dict['args']), **vars(args)})
+                                               ~~~~~~~~~~^^^^^^^^
+KeyError: 'args'

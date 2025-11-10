@@ -18,18 +18,21 @@ def get_args():
     parser.add_argument("--src-model", type=str, default=None, help="Path to the Source Language SentencePiece tokenization model. If none, creates a tokenization model from the training-split.")
     parser.add_argument("--tgt-model", type=str, default=None, help="Path to the Target Language SentencePiece tokenization model. If none, creates a tokenization model from the training-split.")
     parser.add_argument("--force-train", action="store_true", help="Force training even if a model already exists.")
+
     # File prefixes (optional)
     parser.add_argument('--train-prefix', default=None, metavar='FP', help='raw train file prefix (without .lang extension)')
     parser.add_argument('--tiny-train-prefix', default=None, metavar='FP', help='raw tiny train file prefix (without .lang extension)')
     parser.add_argument('--valid-prefix', default=None, metavar='FP', help='raw valid file prefix (without .lang extension)')
     parser.add_argument('--test-prefix', default=None, metavar='FP', help='raw test file prefix (without .lang extension)')
     parser.add_argument("--ignore-existing", action="store_true", help="Skip processing of raw-files if the output file already exists. Useful for resuming.")
+
     parser.add_argument("--src-vocab-size", type=int, default=32000, help="Vocabulary size for Source Language SentencePiece.")
     parser.add_argument("--tgt-vocab-size", type=int, default=32000, help="Vocabulary size for Target Language SentencePiece.")
     
     parser.add_argument("--quiet", action="store_true", help="Suppress logging output.")
+    parser.add_argument("--joint-bpe", action="store_true", help="Train a single joint BPE model on source + target.")
 
-    # OPTIONAL: add possibility to override default tokens
+    # Special tokens (names for logging; IDs are fixed below)
     parser.add_argument("--eos-token", type=str, default="</s>", help="End of sentence token.")
     parser.add_argument("--bos-token", type=str, default="<s>", help="Beginning of sentence token.")
     parser.add_argument("--pad-token", type=str, default="<pad>", help="Padding token.")
@@ -38,54 +41,56 @@ def get_args():
     return parser.parse_args()
 
 
-
-def make_binary_dataset(input_file, output_file, preprocessor: BPETokenizer, append_eos=True, ignore_existing=False):
-    # skip processing if output file already exists
+def make_binary_dataset(input_file, output_file, preprocessor: BPETokenizer, append_eos=True, ignore_existing=False, quiet=False):
     if os.path.exists(output_file) and not ignore_existing:
         logging.info(f"File {output_file} already exists, skipping...")
         return
     
     nsent, ntok = 0, 0
-    # count unknown tokens
     unk_counter = 0
-    
-    # define consumer (used as a callback in encode_to_tensor) for unknown tokens
+
     def unk_consumer(idx):
         nonlocal unk_counter
         if idx == preprocessor.tokenizer.unk_id():
             unk_counter += 1
 
     tokens_list = []
-    # open input file, read lines and encode_to_tensor
     with open(input_file, 'r', encoding='utf-8') as inf:
         for line in inf:
             tokens = preprocessor.encode_to_tensor(line.strip(), append_eos, consumer=unk_consumer)
-            nsent, ntok = nsent + 1, ntok + len(tokens)
+            nsent += 1
+            ntok += len(tokens)
             tokens_list.append(tokens.numpy())
-    # save output file
+
     with open(output_file, 'wb') as outf:
         pickle.dump(tokens_list, outf, protocol=pickle.DEFAULT_PROTOCOL)
-        if not args.quiet:
-            logging.info('Built a binary dataset for {}: {} sentences, {} tokens, {:.3f}% replaced by unknown token'.format(
-            input_file, nsent, ntok, 100.0 * unk_counter / ntok, preprocessor.tokenizer.unk_id()))
+        if not quiet:
+            unk_pct = 0.0 if ntok == 0 else (100.0 * unk_counter / ntok)
+            logging.info(
+                "Built a binary dataset for %s: %d sentences, %d tokens, %.3f%% <unk> (unk_id=%d)",
+                input_file, nsent, ntok, unk_pct, preprocessor.tokenizer.unk_id()
+            )
 
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    # parse arguments from the command line
     args = get_args()
 
-    # define paths for tokenization models
-    # if no model path is given, create a model path in the model directory with the format LANG-bpe-VOCABSIZE.model
+    # If user passed the SAME model path for src/tgt, they likely intend joint BPE.
+    if (not args.joint_bpe) and args.src_model and args.tgt_model and os.path.abspath(args.src_model) == os.path.abspath(args.tgt_model):
+        logging.info("Detected identical --src-model and --tgt-model. Enabling --joint-bpe.")
+        args.joint_bpe = True
+
+    # Resolve model file paths if not provided
     tgt_tokenizer_model = args.tgt_model if args.tgt_model \
         else os.path.join(args.model_dir, f"{args.target_lang}-bpe-{args.tgt_vocab_size}.model")
     src_tokenizer_model = args.src_model if args.src_model \
         else os.path.join(args.model_dir, f"{args.source_lang}-bpe-{args.src_vocab_size}.model")
     
     os.makedirs(args.dest_dir, exist_ok=True)
+    os.makedirs(args.model_dir, exist_ok=True)
 
-    # ----------------------------
-    # SOURCE LANGUAGE:
+    # Instantiate tokenizers
     src_processor = BPETokenizer(
         language=args.source_lang,
         vocab_size=args.src_vocab_size,
@@ -94,27 +99,6 @@ if __name__ == "__main__":
         pad=args.pad_token,
         unk=args.unk_token
     )
-    # train or load model
-    # if no model path is given or the given model file does not exist, train a new model
-    if (not os.path.exists(src_tokenizer_model)) or (args.force_train):
-        # error handling if no training data is provided
-        if args.train_prefix is None:
-            raise ValueError("No training data provided for training the source language tokenizer model.")
-        # train model
-        src_processor.train_tokenizer(training_data=os.path.join(args.raw_data, f"{args.train_prefix}.{args.source_lang}"), model_dir=args.model_dir)
-        if not args.quiet:
-            logging.info('Trained SentencePiece model for {} with {} words'.format(args.source_lang, src_processor.vocab_size))
-    else:
-        # load model
-        src_processor.load(model_path=src_tokenizer_model)
-        if not args.quiet:
-            logging.info('Loaded SentencePiece model for {} from {}'.format(args.source_lang, src_tokenizer_model))
-    src_processor.save_vocab(args.model_dir)
-    # ----------------------------
-
-
-    # ----------------------------
-    # TARGET LANGUAGE:
     tgt_processor = BPETokenizer(
         language=args.target_lang,
         vocab_size=args.tgt_vocab_size,
@@ -123,51 +107,147 @@ if __name__ == "__main__":
         pad=args.pad_token,
         unk=args.unk_token
     )
-    # train or load model
-    if (not os.path.exists(tgt_tokenizer_model)) or (args.force_train):
-        if args.train_prefix is None:
-            raise ValueError("No training data provided for training the target language tokenizer model.")
-        tgt_processor.train_tokenizer(training_data=os.path.join(args.raw_data, f"{args.train_prefix}.{args.target_lang}"), model_dir=args.model_dir)
-        if not args.quiet:
-            logging.info('Trained SentencePiece model for {} with {} words'.format(args.target_lang, tgt_processor.vocab_size))
-    else:
-        tgt_processor.load(model_path=tgt_tokenizer_model)
-        if not args.quiet:
-            logging.info('Loaded SentencePiece model for {} from {}'.format(args.target_lang, args.tgt_model))
-    tgt_processor.save_vocab(args.model_dir)
-    # ----------------------------
 
-    # function to create dataset splits with the desired prefixes
+    # ===========================
+    # JOINT BPE (safe special IDs)
+    # ===========================
+    if args.joint_bpe:
+        joint_model_prefix = os.path.join(args.model_dir, f"joint-bpe-{args.src_vocab_size}")
+        joint_model_file   = joint_model_prefix + ".model"
+        joint_vocab_file   = joint_model_prefix + ".vocab"
+        combined_file      = os.path.join(args.model_dir, "joint_train.txt")
+
+        # Build combined training file
+        if not os.path.exists(combined_file) or args.force_train:
+            if args.train_prefix is None:
+                raise ValueError("--train-prefix is required for joint BPE training.")
+            src_file = os.path.join(args.raw_data, f"{args.train_prefix}.{args.source_lang}")
+            tgt_file = os.path.join(args.raw_data, f"{args.train_prefix}.{args.target_lang}")
+            with open(combined_file, "w", encoding="utf-8") as out, \
+                 open(src_file, "r", encoding="utf-8") as s, \
+                 open(tgt_file, "r", encoding="utf-8") as t:
+                for src_line, tgt_line in zip(s, t):
+                    out.write(src_line.strip() + "\n")
+                    out.write(tgt_line.strip() + "\n")
+            logging.info(f"Created combined training file: {combined_file}")
+
+        # Train with EXPLICIT special IDs: unk=0, bos=1, eos=2, pad=3 (NO -1!)
+        if not os.path.exists(joint_model_file) or args.force_train:
+            spm.SentencePieceTrainer.train(
+                input=combined_file,
+                model_prefix=joint_model_prefix,
+                vocab_size=args.src_vocab_size,
+                character_coverage=1.0,
+                model_type="bpe",
+                unk_id=0,
+                bos_id=1,
+                eos_id=2,
+                pad_id=3,
+                unk_piece=args.unk_token,
+                bos_piece=args.bos_token,
+                eos_piece=args.eos_token,
+                pad_piece=args.pad_token,
+            )
+            logging.info(f"✅ Trained joint BPE model: {joint_model_file}")
+        else:
+            logging.info(f"Using existing joint model: {joint_model_file}")
+
+        # Load joint model for both
+        src_processor.load(model_path=joint_model_file)
+        tgt_processor.load(model_path=joint_model_file)
+
+        # Log special IDs (sanity)
+        logging.info("[JOINT] ids: unk=%d bos=%d eos=%d pad=%d",
+                     src_processor.tokenizer.unk_id(),
+                     src_processor.tokenizer.bos_id(),
+                     src_processor.tokenizer.eos_id(),
+                     src_processor.tokenizer.pad_id())
+
+        # Save vocabs for consistency
+        src_processor.save_vocab(args.model_dir)
+        tgt_processor.save_vocab(args.model_dir)
+
+        logging.info("Loaded shared Joint BPE tokenizer for both source and target languages.")
+
+    # ===========================
+    # SEPARATE BPE
+    # ===========================
+    else:
+        # Source
+        if (not os.path.exists(src_tokenizer_model)) or args.force_train:
+            if args.train_prefix is None:
+                raise ValueError("No training data for source tokenizer. Provide --train-prefix.")
+            src_processor.train_tokenizer(
+                training_data=os.path.join(args.raw_data, f"{args.train_prefix}.{args.source_lang}"),
+                model_dir=args.model_dir
+            )
+            logging.info(f"Trained SentencePiece model for {args.source_lang}")
+        else:
+            src_processor.load(model_path=src_tokenizer_model)
+            logging.info(f"Loaded SentencePiece model for {args.source_lang}")
+        src_processor.save_vocab(args.model_dir)
+
+        # Target
+        if (not os.path.exists(tgt_tokenizer_model)) or args.force_train:
+            if args.train_prefix is None:
+                raise ValueError("No training data for target tokenizer. Provide --train-prefix.")
+            tgt_processor.train_tokenizer(
+                training_data=os.path.join(args.raw_data, f"{args.train_prefix}.{args.target_lang}"),
+                model_dir=args.model_dir
+            )
+            logging.info(f"Trained SentencePiece model for {args.target_lang}")
+        else:
+            tgt_processor.load(model_path=tgt_tokenizer_model)
+            logging.info(f"Loaded SentencePiece model for {args.target_lang}")
+        tgt_processor.save_vocab(args.model_dir)
+
+        logging.info("[SRC] ids: unk=%d bos=%d eos=%d pad=%d",
+                     src_processor.tokenizer.unk_id(),
+                     src_processor.tokenizer.bos_id(),
+                     src_processor.tokenizer.eos_id(),
+                     src_processor.tokenizer.pad_id())
+        logging.info("[TGT] ids: unk=%d bos=%d eos=%d pad=%d",
+                     tgt_processor.tokenizer.unk_id(),
+                     tgt_processor.tokenizer.bos_id(),
+                     tgt_processor.tokenizer.eos_id(),
+                     tgt_processor.tokenizer.pad_id())
+
+    # ===========================
+    # Build binary splits
+    # ===========================
     def make_split_datasets(lang, pre_processor):
-        """create dataset splits (train, tiny_train, valid, test) for a given language using a dictionary"""
         if args.train_prefix is not None:
             make_binary_dataset(
-                input_file=os.path.join(args.raw_data, args.train_prefix + '.' + lang),
-                output_file=os.path.join(args.dest_dir, 'train.' + lang),
+                input_file=os.path.join(args.raw_data, f"{args.train_prefix}.{lang}"),
+                output_file=os.path.join(args.dest_dir, f"train.{lang}"),
                 preprocessor=pre_processor,
-                ignore_existing=args.ignore_existing
-                )
+                ignore_existing=args.ignore_existing,
+                quiet=args.quiet
+            )
         if args.tiny_train_prefix is not None:
             make_binary_dataset(
-                input_file=os.path.join(args.raw_data, args.tiny_train_prefix + '.' + lang),
-                output_file=os.path.join(args.dest_dir, 'tiny_train.' + lang),
+                input_file=os.path.join(args.raw_data, f"{args.tiny_train_prefix}.{lang}"),
+                output_file=os.path.join(args.dest_dir, f"tiny_train.{lang}"),
                 preprocessor=pre_processor,
-                ignore_existing=args.ignore_existing
-                )
+                ignore_existing=args.ignore_existing,
+                quiet=args.quiet
+            )
         if args.valid_prefix is not None:
             make_binary_dataset(
-                input_file=os.path.join(args.raw_data, args.valid_prefix + '.' + lang),
-                output_file=os.path.join(args.dest_dir, 'valid.' + lang),
+                input_file=os.path.join(args.raw_data, f"{args.valid_prefix}.{lang}"),
+                output_file=os.path.join(args.dest_dir, f"valid.{lang}"),
                 preprocessor=pre_processor,
-                ignore_existing=args.ignore_existing
-                )
+                ignore_existing=args.ignore_existing,
+                quiet=args.quiet
+            )
         if args.test_prefix is not None:
             make_binary_dataset(
-                input_file=os.path.join(args.raw_data, args.test_prefix + '.' + lang),
-                output_file=os.path.join(args.dest_dir, args.test_prefix + '.' + lang),
+                input_file=os.path.join(args.raw_data, f"{args.test_prefix}.{lang}"),
+                output_file=os.path.join(args.dest_dir, f"{args.test_prefix}.{lang}"),
                 preprocessor=pre_processor,
-                ignore_existing=args.ignore_existing
-                )
+                ignore_existing=args.ignore_existing,
+                quiet=args.quiet
+            )
     
     make_split_datasets(args.source_lang, src_processor)
     make_split_datasets(args.target_lang, tgt_processor)
